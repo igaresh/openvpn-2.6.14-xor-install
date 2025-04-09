@@ -1,63 +1,75 @@
-```bash
 #!/bin/bash
+
 set -e
 
-echo "📦 Updating system and installing dependencies..."
-sudo apt update && sudo apt install -y \
-  build-essential libssl-dev iproute2 liblz4-dev \
-  liblzo2-dev libpam0g-dev libpkcs11-helper1-dev \
-  libsystemd-dev resolvconf pkg-config curl wget
+# Colors
+GREEN='\033[0;32m'
+NC='\033[0m' # No Color
 
-echo "💾 Downloading OpenVPN 2.6.14..."
-wget -q https://swupdate.openvpn.org/community/releases/openvpn-2.6.14.tar.gz
+# Update and install dependencies
+echo -e "${GREEN}📦 Updating system and installing dependencies...${NC}"
+apt update && apt install -y build-essential libssl-dev iproute2 liblz4-dev liblzo2-dev libpam0g-dev libpkcs11-helper1-dev libsystemd-dev resolvconf pkg-config curl wget
+
+# Download OpenVPN
+echo -e "${GREEN}💾 Downloading OpenVPN 2.6.14...${NC}"
+wget https://swupdate.openvpn.net/community/releases/openvpn-2.6.14.tar.gz
+rm -rf openvpn-2.6.14
+
+# Extract
+
 tar xzf openvpn-2.6.14.tar.gz
 cd openvpn-2.6.14
 
-echo "📥 Downloading XOR patch files..."
-PATCHES=(
-  "02-tunnelblick-openvpn_xorpatch-a.diff"
-  "03-tunnelblick-openvpn_xorpatch-b.diff"
-  "04-tunnelblick-openvpn_xorpatch-c.diff"
-  "05-tunnelblick-openvpn_xorpatch-d.diff"
-  "06-tunnelblick-openvpn_xorpatch-e.diff"
-)
-for PATCH in "${PATCHES[@]}"; do
-  wget -q https://raw.githubusercontent.com/Tunnelblick/Tunnelblick/master/third_party/sources/openvpn/openvpn-2.6.14/patches/$PATCH
+# Download XOR patches
+echo -e "${GREEN}📥 Downloading XOR patch files...${NC}"
+for patch in 02 03 04 05 06; do
+  wget https://raw.githubusercontent.com/Tunnelblick/Tunnelblick/master/third_party/sources/openvpn/openvpn-2.6.14/patches/${patch}-tunnelblick-openvpn_xorpatch-$(echo $patch | tr '0' 'a').diff
+  patch -p1 < ${patch}-tunnelblick-openvpn_xorpatch-$(echo $patch | tr '0' 'a').diff
 done
 
-echo "🩹 Applying XOR patches..."
-for PATCH in "${PATCHES[@]}"; do
-  patch -p1 < "$PATCH"
-done
+# Configure and install
+echo -e "${GREEN}🛠️ Configuring and compiling OpenVPN...${NC}"
+./configure --enable-static=yes --enable-shared --disable-debug --disable-plugin-auth-pam --disable-dependency-tracking
+make
+make install
 
-echo "🛠️ Configuring OpenVPN..."
-./configure --enable-static --enable-shared --disable-debug --disable-plugin-auth-pam --disable-dependency-tracking
+# Create OpenVPN service file
+echo -e "${GREEN}📆 Creating OpenVPN service...${NC}"
+cat << EOF > /etc/systemd/system/openvpn@server.service
+[Unit]
+Description=OpenVPN Robust And Highly Flexible Tunneling Application On %I
+After=syslog.target network.target
 
-echo "⚙️ Compiling and installing OpenVPN..."
-make -j$(nproc)
-sudo make install
+[Service]
+Type=forking
+PrivateTmp=true
+ExecStart=/usr/local/sbin/openvpn --daemon --cd /etc/openvpn/ --config /etc/openvpn/server.conf
+Restart=on-failure
 
-echo "🔑 Generating XOR scramble key..."
-XOR_KEY=$(head -c 20 /dev/urandom | tr -dc 'a-f0-9' | head -c 12)
-echo "Generated XOR key: $XOR_KEY"
+[Install]
+WantedBy=multi-user.target
+EOF
 
-echo "📄 Updating server and client config templates with XOR scramble key..."
-if [ -f /etc/openvpn/server.conf ]; then
-  sed -i "s/^scramble .*/scramble xormask $XOR_KEY/" /etc/openvpn/server.conf || echo "scramble xormask $XOR_KEY" >> /etc/openvpn/server.conf
-fi
+systemctl daemon-reexec
+systemctl enable openvpn@server
+systemctl start openvpn@server
 
-if [ -f /etc/openvpn/client-template.txt ]; then
-  sed -i "s/^scramble .*/scramble xormask $XOR_KEY/" /etc/openvpn/client-template.txt || echo "scramble xormask $XOR_KEY" >> /etc/openvpn/client-template.txt
-fi
+# Generate random XOR key
+echo -e "${GREEN}🔑 Generating random XOR key...${NC}"
+xor_key=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 12)
+echo "scramble xormask $xor_key" >> /etc/openvpn/server.conf
+echo "scramble xormask $xor_key" >> /etc/openvpn/client-template.txt
+echo "scramble xormask $xor_key" >> /root/client.ovpn
+echo -e "${GREEN}Random XOR key generated and applied: $xor_key${NC}"
 
-echo "✅ OpenVPN 2.6.14 with XOR scramble installed successfully!"
-echo "👉 Remember to update your clients with the new scramble xormask: $XOR_KEY"
-
-read -p "⏰ Do you want to automatically restart OpenVPN every hour? [y/N]: " cron_choice
-if [[ "$cron_choice" =~ ^[Yy]$ ]]; then
-  echo "🔄 Setting up cron job..."
-  (crontab -l 2>/dev/null; echo "0 * * * * systemctl restart openvpn@server") | crontab -
-  echo "🛡️ Cron job added: OpenVPN will restart every hour."
+# Offer to install hourly cron restart (optional)
+echo -e "${GREEN}📅 Offer: Restart OpenVPN hourly to make DPI harder${NC}"
+read -p "Do you want to auto-restart OpenVPN every hour via cron? (y/n): " restart_choice
+if [[ "$restart_choice" == "y" ]]; then
+    (crontab -l 2>/dev/null; echo "0 * * * * systemctl restart openvpn@server") | crontab -
+    echo -e "${GREEN}Cron job installed: OpenVPN will restart every hour.${NC}"
 else
-  echo "ℹ️ Skipping cron job setup."
+    echo -e "${GREEN}Skipped installing hourly restart.${NC}"
 fi
+
+echo -e "${GREEN}✅ OpenVPN 2.6.14 with XOR scramble installed successfully!${NC}"
